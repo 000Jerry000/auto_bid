@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Best Speed — Settings</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="options">
+  <header>
+    <h1>Best Speed</h1>
+    <div class="status-row">
+      <span id="status" class="badge">—</span>
+      <button id="toggle" class="primary">Start</button>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2>General</h2>
+    <div class="grid">
+      <label>Refresh interval (seconds, min 30)
+        <input id="intervalSec" type="number" min="30" step="5">
+      </label>
+      <label>Max bids per hour
+        <input id="maxPerHour" type="number" min="1">
+      </label>
+      <label>Max bids per day
+        <input id="maxPerDay" type="number" min="1">
+      </label>
+    </div>
+    <label class="check">
+      <input id="autoSubmit" type="checkbox">
+      <span><b>Auto-submit</b> — press the final submit button. When off, the proposal form is filled and left open for you to review and send.</span>
+    </label>
+    <div class="grid two">
+      <label>Only bid if title contains any of (space/comma separated, blank = all)
+        <input id="includeKeywords" type="text">
+      </label>
+      <label>Never bid if title contains any of
+        <input id="excludeKeywords" type="text">
+      </label>
+    </div>
+  </section>
+
+  <div id="sites"></div>
+
+  <div class="actions">
+    <button id="save" class="primary">Save</button>
+    <span id="saved" class="muted"></span>
+  </div>
+
+  <section class="card">
+    <div class="row-between">
+      <h2>Activity log</h2>
+      <div>
+        <button id="resetSeen">Reset seen jobs</button>
+        <button id="clearLog">Clear log</button>
+      </div>
+    </div>
+    <ul id="log" class="log"></ul>
+  </section>
+
+  <template id="siteTpl">
+    <section class="card site">
+      <label class="check site-head">
+        <input data-f="enabled" type="checkbox">
+        <h2 data-label></h2>
+      </label>
+      <label>Search page URL (sorted by newest)
+        <input data-f="searchUrl" type="url">
+      </label>
+      <label>Proposal template — placeholders: <code>{title}</code> <code>{url}</code> <code>{site}</code> <code>{date}</code>
+        <textarea data-f="template" rows="9"></textarea>
+      </label>
+      <div class="grid two">
+        <label>Proposed price (yen, blank = leave as is)
+          <input data-f="price" type="text" inputmode="numeric">
+        </label>
+        <label>Delivery in N days (fills empty date fields)
+          <input data-f="deliveryDays" type="number" min="0">
+        </label>
+      </div>
+    </section>
+  </template>
+
+  <script src="sites.js"></script>
+  <script src="ui.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
