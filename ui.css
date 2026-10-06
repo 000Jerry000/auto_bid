@@ -59,3 +59,6 @@ code { font-size: 12px; }
 .log li.success { color: var(--ok); }
 .log li.warn { color: var(--warn); }
 .log li.error { color: var(--err); }
+.bid-now { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.bid-now button { width: 100%; }
+.bid-now p { margin: 6px 0 0; }

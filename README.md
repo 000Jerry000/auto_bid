@@ -19,6 +19,9 @@ Chrome extension (Manifest V3) that watches job search pages on **CrowdWorks**, 
 - Before submitting, the extension fills the largest message textarea, the price field (when a price is set) and empty date fields (today + N days), and ticks agreement checkboxes. If any required field is still empty, it stops, leaves the tab open and notifies you.
 - Rate limits (bids per hour and per day) apply. Tabs for failed bids stay open and log an error. Tabs for successful bids close on their own.
 
+- **Bid on jobs already listed** (Settings): on Start, every job already on the search page is queued as well, and they are opened and bid on one by one.
+- **Bid on this job** (popup): while viewing a job page or its proposal form, click this button to fill in that page's bid form (and submit it if auto-submit is on). It works even when watching is stopped, so it's a good way to check the form filling on each site.
+
 Template placeholders: `{title}`, `{url}`, `{site}`, `{date}`.
 
 ## Files

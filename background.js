@@ -122,14 +122,15 @@ async function handleJobs(site, jobs) {
   }
 
   if (!state.baseline[site]) {
-    jobs.forEach((j) => seen.add(j.id));
     state.baseline[site] = true;
-    await chrome.storage.local.set({
-      seen: { ...state.seen, [site]: [...seen].slice(-MAX_SEEN_PER_SITE) },
-      baseline: state.baseline,
-    });
-    await addLog('info', `${SITES[site].label}: watching (${jobs.length} existing jobs ignored)`);
-    return;
+    await chrome.storage.local.set({ baseline: state.baseline });
+    if (!state.settings.bidExisting) {
+      jobs.forEach((j) => seen.add(j.id));
+      await chrome.storage.local.set({ seen: { ...state.seen, [site]: [...seen].slice(-MAX_SEEN_PER_SITE) } });
+      await addLog('info', `${SITES[site].label}: watching (${jobs.length} existing jobs ignored)`);
+      return;
+    }
+    await addLog('info', `${SITES[site].label}: watching — queueing ${jobs.length} listed jobs`);
   }
 
   const fresh = jobs.filter((j) => !seen.has(j.id));
@@ -184,7 +185,10 @@ async function finishCurrent(status, msg) {
   await chrome.storage.local.set({ current: null });
   await addLog(level, `${label}: ${status.toUpperCase()} — ${task.title}${msg ? ` (${msg})` : ''}`, { url: task.url });
 
-  if (status === 'done') {
+  if (task.manual) {
+    // Started from the popup in the user's own tab: never close it.
+    notify(`tab-${tabId}`, `${status === 'done' ? 'Proposal sent' : status.toUpperCase()} (${label})`, `${task.title}\n${msg || ''}`);
+  } else if (status === 'done') {
     notify(`tab-${tabId}`, `Proposal sent (${label})`, task.title);
     setTimeout(() => chrome.tabs.remove(tabId).catch(() => {}), 3000);
   } else if (status === 'skipped') {
@@ -203,6 +207,34 @@ function renderTemplate(template, task) {
     .replaceAll('{url}', task.url)
     .replaceAll('{site}', SITES[task.site].label)
     .replaceAll('{date}', date);
+}
+
+// Bid on the job open in the given tab (from the popup). Works whether or not watching is running.
+async function bidNow(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return { ok: false, error: 'Tab not found.' };
+  const url = new URL(tab.url);
+  const site = siteKeyForHost(url.host);
+  if (!site) return { ok: false, error: 'Not a CrowdWorks / Lancers / Coconala page.' };
+  const state = await getState();
+  if (state.current && Date.now() - state.current.startedAt > BID_TIMEOUT_MS) {
+    await finishCurrent('failed', 'timed out');
+    state.current = null;
+  }
+  if (state.current) return { ok: false, error: `Busy with another bid: ${state.current.task.title}` };
+
+  const id = (url.pathname.match(SITES[site].jobIdRe) || [])[1] || url.searchParams.get('job_offer_id') || url.pathname;
+  const task = { site, id, title: tab.title, url: tab.url, foundAt: Date.now(), manual: true };
+  const seen = new Set(state.seen[site] || []);
+  seen.add(id);
+  await chrome.storage.local.set({
+    current: { tabId, task, startedAt: Date.now(), step: 0 },
+    seen: { ...state.seen, [site]: [...seen].slice(-MAX_SEEN_PER_SITE) },
+  });
+  await addLog('info', `${SITES[site].label}: manual bid — ${tab.title}`, { url: tab.url });
+  // Reload so the content script starts fresh and picks up its bid role.
+  await chrome.tabs.reload(tabId);
+  return { ok: true };
 }
 
 // ---------- tick ----------
@@ -322,9 +354,10 @@ async function handleMessage(msg, sender) {
   switch (msg.type) {
     case 'hello': {
       const state = await getState();
-      if (!state.settings.running) return null;
-      for (const [site, id] of Object.entries(state.monitor.tabs)) {
-        if (id === tabId) return { role: 'monitor', site };
+      if (state.settings.running) {
+        for (const [site, id] of Object.entries(state.monitor.tabs)) {
+          if (id === tabId) return { role: 'monitor', site };
+        }
       }
       const cur = state.current;
       if (cur && cur.tabId === tabId) {
@@ -363,6 +396,8 @@ async function handleMessage(msg, sender) {
         await finishCurrent(msg.status, msg.msg);
         await processQueue();
       });
+    case 'bidNow':
+      return withLock(() => bidNow(msg.tabId));
     case 'start':
       return start();
     case 'stop':

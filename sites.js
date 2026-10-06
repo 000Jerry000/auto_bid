@@ -50,6 +50,8 @@ const DEFAULT_SETTINGS = {
   intervalSec: 30,
   // false = fill the form and leave it open for you to review; true = press the final submit button.
   autoSubmit: false,
+  // true = on Start, also queue the jobs already on the search page; false = only jobs posted after Start.
+  bidExisting: false,
   maxPerHour: 10,
   maxPerDay: 30,
   includeKeywords: '',

@@ -1,4 +1,4 @@
-const GENERAL_FIELDS = ['intervalSec', 'maxPerHour', 'maxPerDay', 'autoSubmit', 'includeKeywords', 'excludeKeywords'];
+const GENERAL_FIELDS = ['intervalSec', 'maxPerHour', 'maxPerDay', 'autoSubmit', 'bidExisting', 'includeKeywords', 'excludeKeywords'];
 
 function readField(el) {
   if (el.type === 'checkbox') return el.checked;
