@@ -244,6 +244,8 @@ async function bidNow(tabId) {
 
 // ---------- tick ----------
 
+// Refresh cycle: reload the search pages, bid on every job they queued, and only then wait the interval
+// before the next reload. While bids are pending, a tick just keeps the queue moving.
 async function tick() {
   await withLock(async () => {
     const state = await getState();
@@ -251,17 +253,27 @@ async function tick() {
     if (state.current && Date.now() - state.current.startedAt > BID_TIMEOUT_MS) {
       await finishCurrent('failed', 'timed out');
     }
-    await refreshMonitors(await getState());
-    await processQueue();
+    const now = await getState();
+    if (now.current || now.queue.length) await processQueue();
+    else await refreshMonitors(now);
+    // Fallback / watchdog; replaced by a fresh interval when the last pending bid finishes.
+    await scheduleAlarm(now.settings);
   });
 }
 
+// One-shot timer for the next tick, intervalSec from now.
 async function scheduleAlarm(settings) {
   await chrome.alarms.clear(ALARM);
   if (settings.running) {
     const sec = Math.max(30, Number(settings.intervalSec) || 30);
-    chrome.alarms.create(ALARM, { periodInMinutes: sec / 60, delayInMinutes: sec / 60 });
+    chrome.alarms.create(ALARM, { delayInMinutes: sec / 60 });
   }
+}
+
+// When the last pending bid is finished, count the wait before the next refresh from now.
+async function rearmIfIdle() {
+  const { settings, current, queue } = await getState();
+  if (settings.running && !current && !queue.length) await scheduleAlarm(settings);
 }
 
 async function start() {
@@ -329,6 +341,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       await chrome.storage.local.set({ current: null });
       await addLog('warn', `${SITES[state.current.task.site].label}: bid tab was closed — ${state.current.task.title}`);
       await processQueue();
+      await rearmIfIdle();
     }
     for (const [k, id] of Object.entries(state.monitor.tabs)) {
       if (id === tabId) delete state.monitor.tabs[k];
@@ -402,6 +415,7 @@ async function handleMessage(msg, sender) {
         if (!current || current.tabId !== tabId) return;
         await finishCurrent(msg.status, msg.msg);
         await processQueue();
+        await rearmIfIdle();
       });
     case 'bidNow':
       return withLock(() => bidNow(msg.tabId));

@@ -345,14 +345,6 @@ async function bidCrowdWorks(role) {
 
 // ---------- Lancers proposal form (/work/propose_start/{id}) ----------
 
-// The plan / amount section is a React app (#FeeApp); its amount box is the visible input holding a yen value.
-function lcAmountInput(form) {
-  const root = form.querySelector('#FeeApp') || form;
-  return [...root.querySelectorAll('input')].find(
-    (el) => ['text', 'number', 'tel'].includes(el.type) && visible(el) && !el.readOnly && !el.disabled && /^[\d,]+$/.test(el.value.trim())
-  );
-}
-
 const JP_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/;
 
 // Completion-date boxes in the plan section: react-datepicker text inputs (no name / placeholder), shown as "2026年10月22日".
@@ -451,8 +443,8 @@ function lcAgreeNda(form) {
   return cb.checked ? null : 'NDA agreement box could not be checked';
 }
 
-// Lancers bid steps, in order: 1) agree to the NDA if the job has one, 2) message, 3) completion date, then send.
-// The amount is left as Lancers pre-filled it (the client's budget) unless a fixed price is set in Options.
+// Lancers bid steps, in order: 1) agree to the NDA if the job has one, 2) message, 3) completion date, 4) send.
+// The price is never touched: the proposal goes out with the amount Lancers pre-filled.
 async function fillLancers(role, form) {
   const notes = [];
 
@@ -476,24 +468,16 @@ async function fillLancers(role, form) {
     else due = null; // no date box on this form; nothing to verify
   }
 
-  // Optional: a fixed price from Options overrides the pre-filled amount.
-  const price = digits(role.price);
-  if (price) {
-    const amountEl = lcAmountInput(form);
-    if (amountEl) setValue(amountEl, price);
-    else notes.push('price field not found');
-  }
-
   // 4. Send: 内容を確認する goes to Lancers' confirmation page, which the generic flow then submits.
   const submit = form.querySelector('#form_end') || findFinalSubmit(form);
   if (!submit) notes.push('submit button not found');
 
-  const summary = [price ? `¥${price}` : 'pre-filled amount', due && `due ${due.getMonth() + 1}/${due.getDate()}`, lcNdaBox(form) && 'NDA agreed']
+  const summary = [lcNdaBox(form) && 'NDA agreed', 'message', due && `due ${due.getMonth() + 1}/${due.getDate()}`]
     .filter(Boolean).join(', ');
-  return { notes, submit, message, price, due, summary };
+  return { notes, submit, message, due, summary };
 }
 
-function lcUnfilled({ message, price, due }, role, form) {
+function lcUnfilled({ message, due }, role, form) {
   const lost = [];
   const nda = lcNdaBox(form);
   if (nda && !nda.checked) lost.push('NDA agreement');
@@ -502,12 +486,8 @@ function lcUnfilled({ message, price, due }, role, form) {
     const wrong = lcDateInputs(form).filter((el) => !sameDate(el.value, due));
     if (wrong.length) lost.push(`completion date (input "${wrong[0].value}")`);
   }
-  if (price) {
-    // React may re-render the amount box, so look it up again.
-    const current = lcAmountInput(form);
-    if (!current || digits(current.value) !== price) lost.push(`amount (input "${current?.value ?? ''}")`);
-  }
-  lost.push(...emptyRequired(form));
+  // No generic "required field" check here: the optional add-on offer (data[ProposalOption][…]) is marked
+  // required in the HTML, but Lancers accepts the proposal with it empty.
   return lost;
 }
 
@@ -537,32 +517,63 @@ async function lcSubmit(form, submit) {
   return [];
 }
 
-// Returns undefined when this isn't the Lancers proposal form (e.g. a confirmation step), so the generic flow takes over.
+// Lancers flow: edit form (step 0) -> 内容を確認する -> confirmation page (step 1) -> 利用規約に同意して提案する -> done (step 2).
+// Returns undefined when the page is none of these, so the generic flow takes over.
 async function bidLancers(role) {
-  if (!/^\/work\/propose_start\/\d+\/?$/.test(location.pathname)) return undefined;
-  // Only a visible description box means the edit form; the confirmation page may carry it hidden.
-  const message = await waitFor(() => {
+  const descriptionBox = () => {
     const el = document.querySelector('#ProposalDescription');
     return el && visible(el) ? el : null;
-  }, role.step > 0 ? 4000 : 15000);
+  };
+
+  if (role.step > 0) {
+    // Same document as our last click: the POST is still in flight. Navigation kills this script and the
+    // next page continues; only complain if nothing happens for a long time.
+    if (window.__lcSubmitted || window.__lcConfirmed) {
+      await sleep(30000);
+      return report('failed', `clicked ${window.__lcConfirmed ? 'the final 提案する' : '内容を確認する'} but the page did not change`);
+    }
+    // Edit form and confirmation page both have #form_end; only the edit form shows the description box.
+    const page = await waitFor(() => {
+      if (descriptionBox()) return 'form';
+      const btn = document.querySelector('#form_end');
+      return btn && visible(btn) ? 'confirm' : null;
+    }, 4000);
+
+    if (page === 'form') {
+      // Back on the edit form after submitting = Lancers rejected it; don't resubmit in a loop.
+      const errors = lcErrorTexts(descriptionBox().form);
+      return report('failed', `Lancers rejected the proposal${errors.length ? `: ${[...new Set(errors)].join(' / ').slice(0, 200)}` : ''}`);
+    }
+    if (page === 'confirm') {
+      const btn = document.querySelector('#form_end');
+      if (role.step >= 2) {
+        const errors = lcErrorTexts(btn.form || document);
+        return report('failed', `still on the confirmation page after 提案する${errors.length ? `: ${errors.join(' / ').slice(0, 200)}` : ''}`);
+      }
+      if (!role.autoSubmit) return report('review', 'confirmation page reached — auto-submit is OFF');
+      // Final step: 利用規約に同意して提案する.
+      await sleep(800);
+      await chrome.runtime.sendMessage({ type: 'bidStep' });
+      window.__lcConfirmed = true;
+      const blocked = await lcSubmit(btn.form, btn);
+      if (blocked.length) return report('failed', `Lancers blocked the final submit: ${[...new Set(blocked)].join(' / ').slice(0, 200)}`);
+      return watchAfterClick();
+    }
+    // Neither form nor confirmation page after the final click: the proposal went through.
+    if (role.step >= 2) return report('done', shortTextMatches(SUCCESS_RE) || `submitted (now on ${location.pathname})`);
+    return undefined;
+  }
+
+  if (!/^\/work\/propose_start\/\d+\/?$/.test(location.pathname)) return undefined;
+  const message = await waitFor(descriptionBox, 15000);
   const form = message?.form;
   if (!form) {
-    if (role.step > 0) return undefined;
     const already = shortTextMatches(ALREADY_RE);
     return report(already ? 'skipped' : 'failed', already || 'Lancers proposal form not found (logged out, no proposals left, or job closed?)');
   }
-  if (role.step > 0 && window.__lcSubmitted) {
-    await sleep(30000);
-    return report('failed', 'clicked submit but the page did not change');
-  }
-  if (role.step > 0) {
-    // Back on the edit form after submitting = Lancers rejected it; don't resubmit in a loop.
-    const errors = lcErrorTexts(form);
-    return report('failed', `Lancers rejected the proposal${errors.length ? `: ${[...new Set(errors)].join(' / ').slice(0, 200)}` : ''}`);
-  }
 
-  // The plan section (amount / date) renders client-side; give it time to appear.
-  await waitFor(() => lcDateInputs(form).length > 0 || lcAmountInput(form), 10000);
+  // The plan section (with the date) renders client-side; give it time to appear.
+  await waitFor(() => lcDateInputs(form).length > 0, 10000);
   let filled = await fillLancers(role, form);
   if (filled.notes.length) return report('review', filled.notes.join('; '));
   await sleep(1500);
