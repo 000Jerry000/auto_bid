@@ -182,13 +182,163 @@ function fillForm(role, messageField) {
     }
   }
 
-  const missing = [...scope.querySelectorAll('input, textarea, select')]
-    .filter((el) => (el.required || el.getAttribute('aria-required') === 'true') && visible(el))
-    .filter((el) => (el.type === 'checkbox' || el.type === 'radio' ? !scope.querySelector(`input[name="${CSS.escape(el.name)}"]:checked`) : !el.value))
-    .map((el) => labelText(el).slice(0, 30) || el.name || el.tagName.toLowerCase());
-  if (missing.length) notes.push(`required fields still empty: ${[...new Set(missing)].join(', ')}`);
+  const missing = emptyRequired(scope);
+  if (missing.length) notes.push(`required fields still empty: ${missing.join(', ')}`);
 
   return { scope, notes };
+}
+
+// Labels of visible required fields in scope that are still empty.
+function emptyRequired(scope) {
+  const missing = [...scope.querySelectorAll('input, textarea, select')]
+    .filter((el) => (el.required || el.getAttribute('aria-required') === 'true') && visible(el))
+    .filter((el) => (el.type === 'checkbox' || el.type === 'radio' ? !scope.querySelector(`input[name="${CSS.escape(el.name)}"]:checked`) : !clean(el.value)))
+    .map((el) => labelText(el).slice(0, 30) || el.name || el.tagName.toLowerCase());
+  return [...new Set(missing)];
+}
+
+// A "confirm" button that belongs to a form with a message box or empty required fields is that
+// form's own submit button (e.g. 応募する on an unfilled proposal form), not a confirmation step.
+function isUnfilledFormSubmit(btn) {
+  const form = btn.closest('form');
+  return !!form && (!!form.querySelector('textarea') || emptyRequired(form).length > 0);
+}
+
+// ---------- CrowdWorks proposal form (/proposals/new?job_offer_id=...) ----------
+
+function digits(v) {
+  return String(v || '').replace(/[^\d]/g, '');
+}
+
+// Lowest yen amount in the client's posted conditions, e.g. "4,000円 〜 5,000円" -> 4000.
+function cwClientAmount(form, hourly) {
+  const texts = hourly ? [form.querySelector('.offered_hourly_wage')?.textContent] : [];
+  for (const c of document.querySelectorAll('.job_offer-conditions .condition')) {
+    const name = clean(c.querySelector('.condition_name')?.textContent);
+    if (hourly ? /時間単価/.test(name) : /予算|報酬|金額/.test(name) && !/形式|時間単価/.test(name)) {
+      texts.push(c.querySelector('.condition_body')?.textContent);
+    }
+  }
+  for (const t of texts) {
+    const m = (t || '').match(/([\d,]+)\s*円/);
+    if (m) return digits(m[1]);
+  }
+  return '';
+}
+
+function cwSetAmount(dummy, hidden, value) {
+  setValue(dummy, value);
+  // CrowdWorks recalculates the hidden real field from the visible one on key events.
+  dummy.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
+  if (hidden && (!hidden.value || hidden.value === '0')) hidden.value = value;
+}
+
+function fillCrowdWorks(role, form) {
+  const notes = [];
+  const q = (sel) => form.querySelector(sel);
+
+  // "契約金額を提示" (propose an amount), presented as the contract amount (not the worker's take-home).
+  const withAmount = q('#without_condition_false');
+  if (withAmount && !withAmount.checked) withAmount.click();
+
+  const hourly = (q('input.payment_type:checked')?.value || 'hourly') === 'hourly';
+  const presentAs = q(hourly ? '#how_to_present_hourly_contract_amount' : '#how_to_present_fixed_price_contract_amount');
+  if (presentAs && !presentAs.checked) presentAs.click();
+
+  const configured = digits(hourly ? role.hourlyWage : role.price);
+  const amount = configured || cwClientAmount(form, hourly);
+  const dummy = q(hourly ? 'input.user_input_hourly_wage' : 'input.user_input_budget');
+  const hidden = q(hourly ? 'input.hourly_wage' : 'input.budget');
+  if (!dummy) notes.push(`${hourly ? 'hourly rate' : 'price'} field not found`);
+  else if (!amount) notes.push(`no ${hourly ? 'hourly rate' : 'price'} set and the client posted none`);
+  else cwSetAmount(dummy, hidden, amount);
+
+  if (hourly && digits(role.hoursPerWeek)) {
+    const hours = q('#proposal_conditions_attributes_0_hours_limit');
+    if (hours) setValue(hours, digits(role.hoursPerWeek));
+  }
+
+  // Completion date (fixed price, optional): only when empty.
+  const days = Number(role.deliveryDays);
+  const [y, mo, d] = ['1i', '2i', '3i'].map((p) => q(`#proposal_conditions_attributes_0_milestones_attributes_0_deadline_${p}`));
+  if (!hourly && days > 0 && y && mo && d && !y.value) {
+    const dt = new Date(Date.now() + days * 86400000);
+    if ([...y.options].some((o) => o.value === String(dt.getFullYear()))) {
+      setValue(y, String(dt.getFullYear()));
+      setValue(mo, String(dt.getMonth() + 1));
+      setValue(d, String(dt.getDate()));
+    }
+  }
+
+  const message = q('#proposal_conditions_attributes_0_message_attributes_body') || q('textarea.message-body');
+  if (message) setValue(message, role.message);
+  else notes.push('message field not found');
+  if (!clean(role.message)) notes.push('message template is empty');
+
+  const submit = q('input[type="submit"][name="commit"]');
+  if (!submit) notes.push('submit button not found');
+
+  return {
+    notes, submit, amount, dummy, hidden, message,
+    summary: `${hourly ? `¥${amount}/hour` : `¥${amount}`}${configured ? '' : ' (client\'s posted amount)'}`,
+  };
+}
+
+// What is no longer filled in (CrowdWorks' scripts or a draft restore can reset fields after we set them).
+function cwUnfilled({ amount, dummy, hidden, message }) {
+  const lost = [];
+  if (!message || !clean(message.value)) lost.push('message');
+  if (!dummy || !hidden || digits(dummy.value) !== amount || digits(hidden.value) !== amount) {
+    lost.push(`amount (input "${dummy?.value ?? ''}", sent "${hidden?.value ?? ''}")`);
+  }
+  return lost;
+}
+
+// Returns undefined when this isn't a CrowdWorks proposal page, so the generic flow takes over.
+async function bidCrowdWorks(role) {
+  const onForm = /^\/proposals(\/new)?\/?$/.test(location.pathname);
+  if (!onForm) {
+    // Submitted and redirected away from the form: the proposal went through.
+    if (role.step > 0) return report('done', shortTextMatches(SUCCESS_RE) || `submitted (now on ${location.pathname})`);
+    return undefined;
+  }
+  const form = await waitFor(() => document.querySelector('form#new_proposal'), 15000);
+  if (!form) {
+    const already = shortTextMatches(ALREADY_RE);
+    return report(already ? 'skipped' : 'failed', already || 'CrowdWorks proposal form not found (logged out, already applied, or job closed?)');
+  }
+  if (role.step > 0 && window.__cwSubmitted) {
+    // Same page as the click: the POST is still in flight. Navigation will kill this script and
+    // the next page reports the result; only complain if nothing happens for a long time.
+    await sleep(30000);
+    return report('failed', 'clicked 応募する but the page did not change');
+  }
+  if (role.step > 0) {
+    // Back on the form after submitting = CrowdWorks rejected it; don't resubmit in a loop.
+    const errors = [...document.querySelectorAll('.cw-has_error .cw-help_block, .error, .alert, .cw-alert, .flash')]
+      .filter(visible).map((e) => clean(e.textContent)).filter(Boolean);
+    return report('failed', `CrowdWorks rejected the proposal${errors.length ? `: ${[...new Set(errors)].join(' / ').slice(0, 200)}` : ''}`);
+  }
+
+  let filled = fillCrowdWorks(role, form);
+  if (filled.notes.length) return report('review', filled.notes.join('; '));
+  // Let the page's own scripts settle, then make sure our values stuck; refill once if they didn't.
+  await sleep(1500);
+  if (cwUnfilled(filled).length) {
+    filled = fillCrowdWorks(role, form);
+    await sleep(1500);
+  }
+  let lost = cwUnfilled(filled);
+  if (lost.length) return report('review', `did not stay filled: ${lost.join(', ')} — not submitted`);
+  if (!role.autoSubmit) return report('review', `form filled (${filled.summary}) — auto-submit is OFF, submit it yourself`);
+  await sleep(800);
+  // Last check immediately before the click: never send an empty proposal.
+  lost = cwUnfilled(filled);
+  if (lost.length) return report('review', `did not stay filled: ${lost.join(', ')} — not submitted`);
+  await chrome.runtime.sendMessage({ type: 'bidStep' });
+  window.__cwSubmitted = true;
+  filled.submit.click();
+  return watchAfterClick();
 }
 
 function report(status, msg) {
@@ -199,6 +349,11 @@ async function bid(siteKey, role) {
   const site = SITES[siteKey];
   if (role.step >= role.maxSteps) return report('failed', 'too many steps without finishing');
   await sleep(1500);
+
+  if (siteKey === 'crowdworks') {
+    const r = await bidCrowdWorks(role);
+    if (r !== undefined) return r;
+  }
 
   if (role.step > 0) {
     const done = shortTextMatches(SUCCESS_RE);
@@ -220,9 +375,11 @@ async function bid(siteKey, role) {
         const done = shortTextMatches(SUCCESS_RE);
         if (done) return { kind: 'done', text: done };
         const btn = findFinalSubmit(document);
-        if (btn) return { kind: 'confirm', btn };
+        if (btn && !isUnfilledFormSubmit(btn)) return { kind: 'confirm', btn };
       }
     }
+    // On a proposal form page, "応募する" is the submit button, not a link to the form — never click it unfilled.
+    if (PROPOSAL_PATH_RE.test(location.pathname)) return null;
     const pb = findButton(document, site.proposeButtonRe);
     if (pb) return { kind: 'propose', btn: pb };
     return null;
@@ -251,6 +408,10 @@ async function bid(siteKey, role) {
       const btn = findFinalSubmit(scope) || findFinalSubmit(document);
       if (!btn) return report('review', 'form filled but no submit button found');
       await sleep(800);
+      const lost = emptyRequired(scope);
+      if (lost.length || !clean(result.field.value)) {
+        return report('review', `did not stay filled: ${[...lost, ...(clean(result.field.value) ? [] : ['message'])].join(', ')} — not submitted`);
+      }
       await chrome.runtime.sendMessage({ type: 'bidStep' });
       activate(btn);
       return watchAfterClick();

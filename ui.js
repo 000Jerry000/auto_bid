@@ -2,11 +2,7 @@
 
 async function loadSettings() {
   const { settings } = await chrome.storage.local.get('settings');
-  const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
-  s.sites = Object.fromEntries(
-    Object.keys(SITES).map((k) => [k, { ...DEFAULT_SETTINGS.sites[k], ...((settings && settings.sites && settings.sites[k]) || {}) }])
-  );
-  return s;
+  return mergeSettings(settings);
 }
 
 function renderStatus(settings) {
