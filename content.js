@@ -201,7 +201,7 @@ function emptyRequired(scope) {
 // form's own submit button (e.g. 応募する on an unfilled proposal form), not a confirmation step.
 function isUnfilledFormSubmit(btn) {
   const form = btn.closest('form');
-  return !!form && (!!form.querySelector('textarea') || emptyRequired(form).length > 0);
+  return !!form && ([...form.querySelectorAll('textarea')].some(visible) || emptyRequired(form).length > 0);
 }
 
 // ---------- CrowdWorks proposal form (/proposals/new?job_offer_id=...) ----------
@@ -258,15 +258,17 @@ function fillCrowdWorks(role, form) {
     if (hours) setValue(hours, digits(role.hoursPerWeek));
   }
 
-  // Completion date (fixed price, optional): only when empty.
+  // Completion date (fixed price): today + N days, replacing the client's preferred date CrowdWorks pre-fills.
   const days = Number(role.deliveryDays);
   const [y, mo, d] = ['1i', '2i', '3i'].map((p) => q(`#proposal_conditions_attributes_0_milestones_attributes_0_deadline_${p}`));
-  if (!hourly && days > 0 && y && mo && d && !y.value) {
-    const dt = new Date(Date.now() + days * 86400000);
-    if ([...y.options].some((o) => o.value === String(dt.getFullYear()))) {
-      setValue(y, String(dt.getFullYear()));
-      setValue(mo, String(dt.getMonth() + 1));
-      setValue(d, String(dt.getDate()));
+  if (!hourly && days > 0 && y && mo && d) {
+    const now = new Date();
+    const dt = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
+    const parts = [[y, dt.getFullYear()], [mo, dt.getMonth() + 1], [d, dt.getDate()]];
+    if (parts.every(([sel, v]) => [...sel.options].some((o) => o.value === String(v)))) {
+      for (const [sel, v] of parts) setValue(sel, String(v));
+    } else {
+      notes.push(`completion date ${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()} is not selectable`);
     }
   }
 
@@ -341,6 +343,246 @@ async function bidCrowdWorks(role) {
   return watchAfterClick();
 }
 
+// ---------- Lancers proposal form (/work/propose_start/{id}) ----------
+
+// The plan / amount section is a React app (#FeeApp); its amount box is the visible input holding a yen value.
+function lcAmountInput(form) {
+  const root = form.querySelector('#FeeApp') || form;
+  return [...root.querySelectorAll('input')].find(
+    (el) => ['text', 'number', 'tel'].includes(el.type) && visible(el) && !el.readOnly && !el.disabled && /^[\d,]+$/.test(el.value.trim())
+  );
+}
+
+const JP_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/;
+
+// Completion-date boxes in the plan section: react-datepicker text inputs (no name / placeholder), shown as "2026年10月22日".
+function lcDateInputs(form) {
+  const root = form.querySelector('#FeeApp') || form;
+  return [...root.querySelectorAll('.react-datepicker__input-container input')].filter((el) => visible(el) && !el.disabled);
+}
+
+function sameDate(value, dt) {
+  const v = String(value);
+  let y, mo, d;
+  let m = v.match(JP_DATE_RE) || v.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (m) [, y, mo, d] = m;
+  else if ((m = v.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/))) [, mo, d, y] = m;
+  else return false;
+  return +y === dt.getFullYear() && +mo === dt.getMonth() + 1 && +d === dt.getDate();
+}
+
+const EN_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// Year and month (1-12) the open calendar shows, from a header like "2026年10月", "10月 2026" or "October 2026".
+function dpShownMonth(cal) {
+  const t = clean(cal.querySelector('.react-datepicker__current-month')?.textContent || cal.querySelector('.react-datepicker__header')?.textContent);
+  const y = t.match(/\d{4}/)?.[0];
+  let mo = t.match(/(\d{1,2})\s*月/)?.[1];
+  if (!mo) {
+    const i = EN_MONTHS.findIndex((n) => t.toLowerCase().includes(n));
+    if (i >= 0) mo = i + 1;
+  }
+  return y && mo ? { y: +y, mo: +mo } : null;
+}
+
+// Pick a date in a react-datepicker by opening its calendar and clicking the day, like a person would.
+async function dpPick(input, dt) {
+  input.click();
+  const wrapper = input.closest('.react-datepicker-wrapper');
+  const cal = await waitFor(
+    () => [wrapper?.parentElement?.querySelector('.react-datepicker'), ...document.querySelectorAll('.react-datepicker')].find((c) => c && visible(c)),
+    3000, 200
+  );
+  if (!cal) return 'calendar did not open';
+  for (let i = 0; i < 24; i++) {
+    const shown = dpShownMonth(cal);
+    if (!shown) return 'could not read the calendar month';
+    const diff = (dt.getFullYear() - shown.y) * 12 + (dt.getMonth() + 1 - shown.mo);
+    if (diff === 0) break;
+    const nav = cal.querySelector(diff > 0 ? '.react-datepicker__navigation--next' : '.react-datepicker__navigation--previous');
+    if (!nav || nav.disabled) return 'calendar cannot reach that month';
+    nav.click();
+    await sleep(250);
+  }
+  const day = cal.querySelector(`.react-datepicker__day--0${String(dt.getDate()).padStart(2, '0')}:not(.react-datepicker__day--outside-month)`);
+  if (!day) return 'day not found in the calendar';
+  if (day.classList.contains('react-datepicker__day--disabled') || day.getAttribute('aria-disabled') === 'true') return 'that day is disabled in the calendar';
+  day.click();
+  await sleep(300);
+  if (visible(cal)) input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+  return sameDate(input.value, dt) ? null : `calendar click did not set it (input "${input.value}")`;
+}
+
+// Set every completion-date box to dt; returns problems (empty = all set).
+async function lcFillDates(form, dt) {
+  const problems = [];
+  for (const input of lcDateInputs(form)) {
+    if (sameDate(input.value, dt)) continue;
+    const err = await dpPick(input, dt);
+    if (!err) continue;
+    // Fallback: type the date as Lancers displays it, with and without zero padding.
+    const mo = dt.getMonth() + 1, d = dt.getDate();
+    for (const text of [`${dt.getFullYear()}年${mo}月${d}日`, `${dt.getFullYear()}年${String(mo).padStart(2, '0')}月${String(d).padStart(2, '0')}日`]) {
+      setValue(input, text);
+      await sleep(300);
+      if (sameDate(input.value, dt)) break;
+    }
+    if (!sameDate(input.value, dt)) problems.push(`completion date not set (${err})`);
+  }
+  return problems;
+}
+
+// Some jobs require agreeing to an NDA (秘密保持契約) before proposing; Lancers rejects the proposal with
+// 同意してください otherwise. The box has no "required" attribute, so it needs its own handling.
+function lcNdaBox(form) {
+  return form.querySelector('#ProposalIsAgreement, input[type="checkbox"].js-work-contract-agree');
+}
+
+function lcAgreeNda(form) {
+  const cb = lcNdaBox(form);
+  if (!cb || cb.checked) return null;
+  cb.click();
+  if (!cb.checked) {
+    // Lancers greys it out with a "disabled" class (not the attribute) and may swallow the click; set it directly.
+    cb.checked = true;
+    cb.classList.remove('disabled');
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return cb.checked ? null : 'NDA agreement box could not be checked';
+}
+
+// Lancers bid steps, in order: 1) agree to the NDA if the job has one, 2) message, 3) completion date, then send.
+// The amount is left as Lancers pre-filled it (the client's budget) unless a fixed price is set in Options.
+async function fillLancers(role, form) {
+  const notes = [];
+
+  // 1. NDA (秘密保持契約) agreement, only on jobs that have one.
+  const nda = lcAgreeNda(form);
+  if (nda) notes.push(nda);
+
+  // 2. Message: Lancers pre-fills its own writing guide; replace it entirely.
+  const message = form.querySelector('#ProposalDescription') || form.querySelector('textarea.js-proposal-description');
+  if (message) setValue(message, role.message);
+  else notes.push('message field not found');
+  if (!clean(role.message)) notes.push('message template is empty');
+
+  // 3. Completion date: today + N days, picked in each plan's calendar.
+  let due = null;
+  const days = Number(role.deliveryDays);
+  if (days > 0) {
+    const now = new Date();
+    due = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
+    if (lcDateInputs(form).length) notes.push(...(await lcFillDates(form, due)));
+    else due = null; // no date box on this form; nothing to verify
+  }
+
+  // Optional: a fixed price from Options overrides the pre-filled amount.
+  const price = digits(role.price);
+  if (price) {
+    const amountEl = lcAmountInput(form);
+    if (amountEl) setValue(amountEl, price);
+    else notes.push('price field not found');
+  }
+
+  // 4. Send: 内容を確認する goes to Lancers' confirmation page, which the generic flow then submits.
+  const submit = form.querySelector('#form_end') || findFinalSubmit(form);
+  if (!submit) notes.push('submit button not found');
+
+  const summary = [price ? `¥${price}` : 'pre-filled amount', due && `due ${due.getMonth() + 1}/${due.getDate()}`, lcNdaBox(form) && 'NDA agreed']
+    .filter(Boolean).join(', ');
+  return { notes, submit, message, price, due, summary };
+}
+
+function lcUnfilled({ message, price, due }, role, form) {
+  const lost = [];
+  const nda = lcNdaBox(form);
+  if (nda && !nda.checked) lost.push('NDA agreement');
+  if (!message || clean(message.value) !== clean(role.message)) lost.push('message');
+  if (due) {
+    const wrong = lcDateInputs(form).filter((el) => !sameDate(el.value, due));
+    if (wrong.length) lost.push(`completion date (input "${wrong[0].value}")`);
+  }
+  if (price) {
+    // React may re-render the amount box, so look it up again.
+    const current = lcAmountInput(form);
+    if (!current || digits(current.value) !== price) lost.push(`amount (input "${current?.value ?? ''}")`);
+  }
+  lost.push(...emptyRequired(form));
+  return lost;
+}
+
+function lcErrorTexts(form) {
+  return [...form.querySelectorAll('.c-form__item-error, .js-work-contract-error, .error-message, .c-form__error')]
+    .filter(visible).map((e) => clean(e.textContent)).filter((t) => t && t.length < 120);
+}
+
+// Click 内容を確認する; if Lancers' scripts swallow the click (js-no-double-click, NDA guard) and the page stays put
+// without showing a new error, post the form directly. Returns new error texts if Lancers showed any.
+async function lcSubmit(form, submit) {
+  const before = new Set(lcErrorTexts(form));
+  let leaving = false;
+  window.addEventListener('beforeunload', () => (leaving = true), { once: true });
+  submit.click();
+  await sleep(5000);
+  if (leaving) return []; // the click worked; the next page is loading
+  const added = lcErrorTexts(form).filter((t) => !before.has(t));
+  if (added.length) return added;
+  // Still here: submit without the page's handlers, keeping the button's name=value the server expects.
+  const send = document.createElement('input');
+  send.type = 'hidden';
+  send.name = submit.name;
+  send.value = submit.value;
+  form.append(send);
+  HTMLFormElement.prototype.submit.call(form);
+  return [];
+}
+
+// Returns undefined when this isn't the Lancers proposal form (e.g. a confirmation step), so the generic flow takes over.
+async function bidLancers(role) {
+  if (!/^\/work\/propose_start\/\d+\/?$/.test(location.pathname)) return undefined;
+  // Only a visible description box means the edit form; the confirmation page may carry it hidden.
+  const message = await waitFor(() => {
+    const el = document.querySelector('#ProposalDescription');
+    return el && visible(el) ? el : null;
+  }, role.step > 0 ? 4000 : 15000);
+  const form = message?.form;
+  if (!form) {
+    if (role.step > 0) return undefined;
+    const already = shortTextMatches(ALREADY_RE);
+    return report(already ? 'skipped' : 'failed', already || 'Lancers proposal form not found (logged out, no proposals left, or job closed?)');
+  }
+  if (role.step > 0 && window.__lcSubmitted) {
+    await sleep(30000);
+    return report('failed', 'clicked submit but the page did not change');
+  }
+  if (role.step > 0) {
+    // Back on the edit form after submitting = Lancers rejected it; don't resubmit in a loop.
+    const errors = lcErrorTexts(form);
+    return report('failed', `Lancers rejected the proposal${errors.length ? `: ${[...new Set(errors)].join(' / ').slice(0, 200)}` : ''}`);
+  }
+
+  // The plan section (amount / date) renders client-side; give it time to appear.
+  await waitFor(() => lcDateInputs(form).length > 0 || lcAmountInput(form), 10000);
+  let filled = await fillLancers(role, form);
+  if (filled.notes.length) return report('review', filled.notes.join('; '));
+  await sleep(1500);
+  if (lcUnfilled(filled, role, form).length) {
+    filled = await fillLancers(role, form);
+    await sleep(1500);
+  }
+  let lost = lcUnfilled(filled, role, form);
+  if (lost.length) return report('review', `did not stay filled: ${lost.join(', ')} — not submitted`);
+  if (!role.autoSubmit) return report('review', `form filled (${filled.summary}) — auto-submit is OFF, submit it yourself`);
+  await sleep(800);
+  lost = lcUnfilled(filled, role, form);
+  if (lost.length) return report('review', `did not stay filled: ${lost.join(', ')} — not submitted`);
+  await chrome.runtime.sendMessage({ type: 'bidStep' });
+  window.__lcSubmitted = true;
+  const blocked = await lcSubmit(form, filled.submit);
+  if (blocked.length) return report('failed', `Lancers blocked the submit: ${[...new Set(blocked)].join(' / ').slice(0, 200)}`);
+  return watchAfterClick();
+}
+
 function report(status, msg) {
   return chrome.runtime.sendMessage({ type: 'bidResult', status, msg });
 }
@@ -350,8 +592,9 @@ async function bid(siteKey, role) {
   if (role.step >= role.maxSteps) return report('failed', 'too many steps without finishing');
   await sleep(1500);
 
-  if (siteKey === 'crowdworks') {
-    const r = await bidCrowdWorks(role);
+  const siteHandler = { crowdworks: bidCrowdWorks, lancers: bidLancers }[siteKey];
+  if (siteHandler) {
+    const r = await siteHandler(role);
     if (r !== undefined) return r;
   }
 
