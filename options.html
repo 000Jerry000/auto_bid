@@ -76,8 +76,14 @@
         <textarea data-f="template" rows="9"></textarea>
       </label>
       <div class="grid two">
-        <label>Proposed price (yen, blank = leave as is)
+        <label>Fixed price (yen, tax excl.) — blank = client's minimum budget
           <input data-f="price" type="text" inputmode="numeric">
+        </label>
+        <label>Hourly rate (yen, tax excl.) — blank = client's minimum rate
+          <input data-f="hourlyWage" type="text" inputmode="numeric">
+        </label>
+        <label>Hours per week (hourly jobs) — blank = keep site default
+          <input data-f="hoursPerWeek" type="number" min="1">
         </label>
         <label>Delivery in N days (fills empty date fields)
           <input data-f="deliveryDays" type="number" min="0">

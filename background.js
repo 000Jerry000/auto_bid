@@ -31,15 +31,6 @@ async function getState() {
   };
 }
 
-function mergeSettings(saved) {
-  const s = { ...DEFAULT_SETTINGS, ...(saved || {}) };
-  s.sites = {};
-  for (const key of Object.keys(SITES)) {
-    s.sites[key] = { ...DEFAULT_SETTINGS.sites[key], ...((saved && saved.sites && saved.sites[key]) || {}) };
-  }
-  return s;
-}
-
 async function addLog(level, msg, extra = {}) {
   const { log = [] } = await chrome.storage.local.get('log');
   log.unshift({ time: Date.now(), level, msg, ...extra });
@@ -165,7 +156,7 @@ async function processQueue() {
 
   const task = queue.shift();
   const windowId = await ensureWindow(state.monitor);
-  const tab = await chrome.tabs.create({ windowId, url: task.url, active: false });
+  const tab = await chrome.tabs.create({ windowId, url: bidStartUrl(task.site, task.id), active: false });
   bidTimes.push(now);
   await chrome.storage.local.set({
     queue,
@@ -232,8 +223,13 @@ async function bidNow(tabId) {
     seen: { ...state.seen, [site]: [...seen].slice(-MAX_SEEN_PER_SITE) },
   });
   await addLog('info', `${SITES[site].label}: manual bid — ${tab.title}`, { url: tab.url });
-  // Reload so the content script starts fresh and picks up its bid role.
-  await chrome.tabs.reload(tabId);
+  if (SITES[site].proposeUrl && /^\d+$/.test(id)) {
+    // Go straight to the proposal form (e.g. CrowdWorks proposals/new?job_offer_id=...).
+    await chrome.tabs.update(tabId, { url: SITES[site].proposeUrl(id) });
+  } else {
+    // Reload so the content script starts fresh and picks up its bid role.
+    await chrome.tabs.reload(tabId);
+  }
   return { ok: true };
 }
 
@@ -370,6 +366,8 @@ async function handleMessage(msg, sender) {
           autoSubmit: state.settings.autoSubmit,
           message: renderTemplate(conf.template, cur.task),
           price: conf.price,
+          hourlyWage: conf.hourlyWage,
+          hoursPerWeek: conf.hoursPerWeek,
           deliveryDays: conf.deliveryDays,
         };
       }

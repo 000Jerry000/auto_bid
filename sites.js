@@ -10,7 +10,9 @@ const SITES = {
     listLinkSelector: 'a[href*="/public/jobs/"]',
     jobIdRe: /\/public\/jobs\/(\d+)(?:[/?#]|$)/,
     jobUrl: (id) => `https://crowdworks.jp/public/jobs/${id}`,
-    // Button / link on the job page that opens the proposal form.
+    // Proposal form opened directly, skipping the job page.
+    proposeUrl: (id) => `https://crowdworks.jp/proposals/new?job_offer_id=${id}`,
+    // Button / link on the job page that opens the proposal form (sites without proposeUrl).
     proposeButtonRe: /応募する|提案する/,
   },
   lancers: {
@@ -34,16 +36,33 @@ const SITES = {
   },
 };
 
+// URL the bid tab opens first: the proposal form when the site has one, otherwise the job page.
+function bidStartUrl(siteKey, id) {
+  const site = SITES[siteKey];
+  return site.proposeUrl ? site.proposeUrl(id) : site.jobUrl(id);
+}
+
 function siteKeyForHost(host) {
   return Object.keys(SITES).find((k) => SITES[k].host === host) || null;
 }
 
-const DEFAULT_TEMPLATE = `はじめまして。
+const DEFAULT_TEMPLATE = `この度は、プロジェクトに応募する機会をいただき、誠にありがとうございます。
+
+はじめまして。開発経験10年以上のフルスタックエンジニアです。Webサイト・ECサイト構築、業務システム開発、API連携、AIを活用したシステム開発など、幅広い開発経験がございます。要件を丁寧に理解し、品質・納期・コミュニケーションを大切にしながら、責任を持って最後まで対応することを心がけております。
+
+現在、本プロジェクトの内容を詳しく確認し、最適なご提案ができるよう応募内容を準備しております。恐れ入りますが、提案の提出まで今しばらくお時間をいただけますと幸いです。
+
+ご期待に沿える成果をご提供できるよう、誠心誠意取り組んでまいります。
+
+何卒よろしくお願いいたします。`;
+
+// Earlier built-in templates; a saved template still equal to one of these is upgraded to DEFAULT_TEMPLATE.
+const LEGACY_TEMPLATES = [`はじめまして。
 「{title}」の案件を拝見し、ご連絡いたしました。
 
 （ここに自己紹介・実績・提案内容を記入してください）
 
-ご検討のほど、よろしくお願いいたします。`;
+ご検討のほど、よろしくお願いいたします。`];
 
 const DEFAULT_SETTINGS = {
   running: false,
@@ -59,7 +78,18 @@ const DEFAULT_SETTINGS = {
   sites: Object.fromEntries(
     Object.entries(SITES).map(([key, s]) => [
       key,
-      { enabled: true, searchUrl: s.defaultSearchUrl, template: DEFAULT_TEMPLATE, price: '', deliveryDays: 7 },
+      { enabled: true, searchUrl: s.defaultSearchUrl, template: DEFAULT_TEMPLATE, price: '', hourlyWage: '', hoursPerWeek: '', deliveryDays: 7 },
     ])
   ),
 };
+
+// Saved settings layered over the defaults (per site too), with outdated built-in templates upgraded.
+function mergeSettings(saved) {
+  const s = { ...DEFAULT_SETTINGS, ...(saved || {}) };
+  s.sites = {};
+  for (const key of Object.keys(SITES)) {
+    s.sites[key] = { ...DEFAULT_SETTINGS.sites[key], ...((saved && saved.sites && saved.sites[key]) || {}) };
+    if (LEGACY_TEMPLATES.includes(s.sites[key].template)) s.sites[key].template = DEFAULT_TEMPLATE;
+  }
+  return s;
+}
