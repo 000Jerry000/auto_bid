@@ -23,6 +23,7 @@ const SITES = {
     listLinkSelector: 'a.p-search-job-media__title, a[href*="/work/detail/"]',
     jobIdRe: /\/work\/detail\/(\d+)(?:[/?#]|$)/,
     jobUrl: (id) => `https://www.lancers.jp/work/detail/${id}`,
+    proposeUrl: (id) => `https://www.lancers.jp/work/propose_start/${id}?proposeReferer=`,
     proposeButtonRe: /提案する|見積もり.*提案/,
   },
   coconala: {
@@ -78,7 +79,7 @@ const DEFAULT_SETTINGS = {
   sites: Object.fromEntries(
     Object.entries(SITES).map(([key, s]) => [
       key,
-      { enabled: true, searchUrl: s.defaultSearchUrl, template: DEFAULT_TEMPLATE, price: '', hourlyWage: '', hoursPerWeek: '', deliveryDays: 7 },
+      { enabled: true, searchUrl: s.defaultSearchUrl, template: DEFAULT_TEMPLATE, price: '', hourlyWage: '', hoursPerWeek: '', deliveryDays: 21 },
     ])
   ),
 };
@@ -90,6 +91,8 @@ function mergeSettings(saved) {
   for (const key of Object.keys(SITES)) {
     s.sites[key] = { ...DEFAULT_SETTINGS.sites[key], ...((saved && saved.sites && saved.sites[key]) || {}) };
     if (LEGACY_TEMPLATES.includes(s.sites[key].template)) s.sites[key].template = DEFAULT_TEMPLATE;
+    // 7 was the old built-in default; completion dates are now three weeks out.
+    if (s.sites[key].deliveryDays === 7) s.sites[key].deliveryDays = DEFAULT_SETTINGS.sites[key].deliveryDays;
   }
   return s;
 }

@@ -142,6 +142,8 @@ async function handleJobs(site, jobs) {
   });
 }
 
+let rateLimitLogged = false;
+
 async function processQueue() {
   const state = await getState();
   const { settings, current, queue } = state;
@@ -151,8 +153,15 @@ async function processQueue() {
   const bidTimes = state.bidTimes.filter((t) => now - t < 24 * 3600 * 1000);
   const lastHour = bidTimes.filter((t) => now - t < 3600 * 1000).length;
   if (lastHour >= settings.maxPerHour || bidTimes.length >= settings.maxPerDay) {
-    return; // wait; the queue is retried on every tick
+    // Wait; the queue is retried on every tick. Log once per stretch of waiting, not every tick.
+    if (!rateLimitLogged) {
+      rateLimitLogged = true;
+      const which = lastHour >= settings.maxPerHour ? `${lastHour}/${settings.maxPerHour} this hour` : `${bidTimes.length}/${settings.maxPerDay} today`;
+      await addLog('warn', `Bid limit reached (${which}) — ${queue.length} job(s) waiting in the queue`);
+    }
+    return;
   }
+  rateLimitLogged = false;
 
   const task = queue.shift();
   const windowId = await ensureWindow(state.monitor);
